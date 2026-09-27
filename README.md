@@ -24,6 +24,23 @@ change the password with `POST /auth/change-password`.
 
 Run the security test suite with `npm test`.
 
+## Admin console
+
+Open **`/admin/`** (e.g. http://localhost:3000/admin/) and log in. From there you can:
+
+- **Browse folders** and files, play audio, and copy public links.
+- **Upload** files or whole folders (button or drag & drop). A dropped folder keeps its structure:
+  dropping `ar/` into `lessons/` creates `lessons/ar/...`. File names with unsupported characters
+  are cleaned up automatically (`My Song.mp3` -> `My-Song.mp3`). Tick *Replace files that already exist* to overwrite.
+- **Create a folder**: open *New folder*, then upload into it. Folders are virtual and exist only while they contain files.
+- **Rename/move** files, and (admins) rename/move or delete whole folders.
+- **Manage users** (admins): add users, set their role and folders, reset passwords, unlock, delete.
+- Manage your **API keys** and change your password.
+
+Uploaders see only their own files and can only upload into their granted folders. The console is
+plain HTML/JS in `admin-ui/`, served under a strict CSP (`script-src 'self'`, no inline code).
+The access token is kept in memory only; the session survives a reload through the HttpOnly refresh cookie.
+
 ## Usage
 
 **1. Log in** to get an access token (valid for 15 minutes):
@@ -88,6 +105,24 @@ Rules:
 - Virtual-path files are cached for `PATH_CACHE_SECONDS` (default 1 day) rather than `immutable`, because they
   can be overwritten. After overwriting a file, purge the CDN cache for that URL.
 
+### Managing folders via the API
+
+```bash
+# what is inside a folder (subfolders + files)
+curl "http://localhost:3000/files/browse?folder=ar" -H "Authorization: Bearer <token>"
+# rename/move one file (the target folder must be writable for you; the extension must stay the same)
+curl -X PATCH http://localhost:3000/files/<id> -H "Authorization: Bearer <token>" \
+  -H 'content-type: application/json' -d '{"path":"ar_old/voice01001.mp3"}'
+# admin: rename/move a whole folder (folder grants of users follow along)
+curl -X POST http://localhost:3000/admin/folders/move -H "Authorization: Bearer <token>" \
+  -H 'content-type: application/json' -d '{"from":"ar_old","to":"archive/ar"}'
+# admin: delete a folder and everything in it
+curl -X DELETE "http://localhost:3000/admin/folders?folder=archive" -H "Authorization: Bearer <token>"
+```
+
+A folder move is all-or-nothing: if any destination path is already taken, nothing moves (409).
+Moved or deleted files lose their old URLs, so purge those from your CDN cache.
+
 ### Importing an existing folder
 
 ```bash
@@ -143,10 +178,15 @@ Resetting a password revokes all of that user's sessions. Deleting a user also d
 | DELETE | `/auth/api-keys/:id` | login (not API key) | Revoke an API key |
 | POST | `/files[?folder=&name=&overwrite=]` | uploader | Upload a file and get its URL |
 | GET | `/files[?folder=]` | login | List own files (admin: all) + quota usage |
+| GET | `/files/browse[?folder=]` | login | Subfolders + files of one folder (admin: all users) |
 | GET | `/files/:id` | login | Metadata of an own file (admin: any) |
+| PATCH | `/files/:id` | uploader | Rename/move a file to another path |
 | DELETE | `/files/:id` | uploader | Delete a file (its URL stops working) |
 | GET/POST | `/admin/users` | admin | List / add users |
 | PATCH/DELETE | `/admin/users/:id` | admin | Change role, folders, password, unlock / delete a user |
+| POST | `/admin/folders/move` | admin | Rename/move a folder with all its files |
+| DELETE | `/admin/folders?folder=` | admin | Delete a folder with all its files |
+| GET | `/admin/` | public page (login inside) | Admin console |
 | GET | `/f/:name` | **public** | File for other websites (cached for 1 year) |
 | GET | `/<folder>/<name>` | **public** | Virtual-path file, e.g. `/ar/voice01001.mp3` |
 | GET | `/`, `/<folder>/` | **public** (if `PUBLIC_INDEX=true`) | File index page |

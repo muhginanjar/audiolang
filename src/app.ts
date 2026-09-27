@@ -10,6 +10,7 @@ import { openDb, DB } from './db.js';
 import { authRoutes } from './routes/auth.js';
 import { fileRoutes, publicFileRoutes } from './routes/files.js';
 import { adminRoutes } from './routes/admin.js';
+import { adminUiRoutes } from './routes/admin-ui.js';
 
 export type Role = 'viewer' | 'uploader' | 'admin';
 
@@ -170,6 +171,7 @@ export async function buildApp(opts: BuildOptions = {}) {
   await app.register(authRoutes, { prefix: '/auth' });
   await app.register(fileRoutes, { prefix: '/files', storageDir });
   await app.register(adminRoutes, { prefix: '/admin', storageDir });
+  await app.register(adminUiRoutes); // the /admin/ console page (public shell; all actions use the API)
   // Serves /f/<uuid>.<ext> and virtual paths like /ar/voice01001.mp3 (must stay last: it has a catch-all)
   await app.register(publicFileRoutes, { storageDir });
 

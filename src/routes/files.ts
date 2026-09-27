@@ -12,12 +12,14 @@ import {
   ALLOWED,
   STORED_NAME_RE,
   FileRow,
+  IN_FOLDER_SQL,
   StorageError,
   buildVirtualPath,
   canWriteFolder,
   commitFile,
   detectType,
   getActor,
+  inFolderArg,
   normalizeFolder,
   parseVirtualPath,
 } from '../storage.js';
@@ -233,9 +235,8 @@ export async function fileRoutes(app: FastifyInstance, opts: { storageDir: strin
       }
       if (req.query.folder !== undefined) {
         const folder = normalizeFolder(req.query.folder);
-        // Segments are [A-Za-z0-9._-] only, so escaping "_" is all LIKE needs
-        where.push("vpath LIKE ? ESCAPE '\\'");
-        args.push(`${folder ? folder.replace(/_/g, '\\_') + '/' : ''}%`);
+        where.push(folder ? IN_FOLDER_SQL : 'vpath IS NOT NULL');
+        if (folder) args.push(inFolderArg(folder));
       }
       const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
       const rows = db
@@ -252,6 +253,101 @@ export async function fileRoutes(app: FastifyInstance, opts: { storageDir: strin
         offset,
         usage: { usedBytes: usage.used, quotaBytes: admin ? null : config.userQuotaBytes },
       };
+    },
+  );
+
+  // One folder of the virtual tree: its subfolders and the files directly inside it.
+  // Admins see every file; others only their own (same scoping as GET /files).
+  app.get<{ Querystring: { folder?: string } }>(
+    '/browse',
+    {
+      schema: {
+        querystring: {
+          type: 'object',
+          additionalProperties: false,
+          properties: { folder: { type: 'string', maxLength: 400 } },
+        },
+      },
+    },
+    async (req) => {
+      const actor = getActor(db, req.user.sub)!;
+      const admin = actor.role === 'admin';
+      const folder = normalizeFolder(req.query.folder ?? '');
+      const where = [folder ? IN_FOLDER_SQL.replace('vpath', 'f.vpath') : 'f.vpath IS NOT NULL'];
+      const args: unknown[] = folder ? [inFolderArg(folder)] : [];
+      if (!admin) {
+        where.push('f.user_id = ?');
+        args.push(req.user.sub);
+      }
+      const rows = db
+        .prepare(`SELECT f.*, u.email AS owner FROM files f JOIN users u ON u.id = f.user_id WHERE ${where.join(' AND ')}`)
+        .all(...args) as (FileRow & { owner: string; vpath: string })[];
+
+      const prefix = folder ? `${folder}/` : '';
+      const folders = new Map<string, { name: string; files: number; size: number }>();
+      const files: ReturnType<typeof toDto>[] = [];
+      for (const r of rows) {
+        const rest = r.vpath.slice(prefix.length);
+        const slash = rest.indexOf('/');
+        if (slash === -1) {
+          files.push({ ...toDto(r), ...(admin && { owner: r.owner }) });
+          continue;
+        }
+        const name = rest.slice(0, slash);
+        const f = folders.get(name) ?? { name, files: 0, size: 0 };
+        f.files++;
+        f.size += r.size;
+        folders.set(name, f);
+      }
+      const byName = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' }).compare;
+      return {
+        folder,
+        writable: canWriteFolder(actor.role, actor.folders, folder),
+        folders: [...folders.values()].sort((a, b) => byName(a.name, b.name)),
+        files: files.sort((a, b) => byName(a.path!, b.path!)),
+      };
+    },
+  );
+
+  // Rename or move one file to another virtual path. The target folder needs write access.
+  app.patch<{ Params: { id: string }; Body: { path: string } }>(
+    '/:id',
+    {
+      onRequest: [app.requireRole('uploader', 'admin')],
+      schema: {
+        params: idParams,
+        body: {
+          type: 'object',
+          required: ['path'],
+          additionalProperties: false,
+          properties: { path: { type: 'string', minLength: 1, maxLength: 512 } },
+        },
+      },
+    },
+    async (req, reply) => {
+      const row = findFile(req.params.id, req.user.sub);
+      if (!row) return reply.code(404).send({ error: 'Not Found' });
+      const actor = getActor(db, req.user.sub)!;
+      const target = req.body.path.replace(/^\/+/, '');
+      const slash = target.lastIndexOf('/');
+      const folder = normalizeFolder(slash === -1 ? '' : target.slice(0, slash));
+      if (!canWriteFolder(actor.role, actor.folders, folder)) {
+        return reply.code(403).send({ error: 'You may not move files to this folder' });
+      }
+      // The stored name's extension is the type detected at upload time
+      const vpath = buildVirtualPath(folder, target.slice(slash + 1), path.extname(row.stored_name).slice(1));
+      if (vpath !== row.vpath) {
+        try {
+          db.prepare('UPDATE files SET vpath = ? WHERE id = ?').run(vpath, row.id);
+        } catch (e: any) {
+          if (e?.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+            return reply.code(409).send({ error: 'A file already exists at this path' });
+          }
+          throw e;
+        }
+        req.log.info({ userId: req.user.sub, fileId: row.id, from: row.vpath, to: vpath }, 'file moved');
+      }
+      return toDto({ ...row, vpath });
     },
   );
 
@@ -345,7 +441,7 @@ export async function publicFileRoutes(app: FastifyInstance, opts: { storageDir:
   // from the random stored name, so the URL can never address anything else on disk.
   const notFound = (reply: FastifyReply) => reply.code(404).send({ error: 'Not Found' });
   const isFolder = (folder: string) =>
-    !!db.prepare("SELECT 1 FROM files WHERE vpath LIKE ? ESCAPE '\\' LIMIT 1").get(`${folder.replace(/_/g, '\\_')}/%`);
+    !!db.prepare(`SELECT 1 FROM files WHERE ${IN_FOLDER_SQL} LIMIT 1`).get(inFolderArg(folder));
 
   const sendIndex = (reply: FastifyReply, folder: string) => {
     const listing = buildListing(db, folder);

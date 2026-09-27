@@ -4,7 +4,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import type { Role } from '../app.js';
 import { PASSWORD_MAX, PASSWORD_MIN, hashPassword } from '../security.js';
-import { normalizeFolder, StorageError } from '../storage.js';
+import { IN_FOLDER_SQL, StorageError, inFolderArg, normalizeFolder, parseVirtualPath } from '../storage.js';
 import { jwtOnly } from './auth.js';
 
 const ROLES: Role[] = ['viewer', 'uploader', 'admin'];
@@ -162,6 +162,85 @@ export async function adminRoutes(app: FastifyInstance, opts: { storageDir: stri
         'user updated by admin',
       );
       return toDto(getUser(user.id)!);
+    },
+  );
+
+  // ---------- Folders ----------
+  // Folders are implicit (they exist while files are in them), so moving or deleting one means
+  // updating every file whose virtual path starts with it.
+
+  const folderBody = (props: string[]) => ({
+    type: 'object',
+    required: props,
+    additionalProperties: false,
+    properties: Object.fromEntries(props.map((p) => [p, { type: 'string', minLength: 1, maxLength: 400 }])),
+  });
+
+  // Rename/move a folder with everything in it; folder grants pointing into it follow along
+  app.post<{ Body: { from: string; to: string } }>(
+    '/folders/move',
+    { schema: { body: folderBody(['from', 'to']) } },
+    async (req, reply) => {
+      const from = normalizeFolder(req.body.from);
+      const to = normalizeFolder(req.body.to);
+      if (!from || !to) return reply.code(400).send({ error: 'Folder names cannot be empty' });
+      if (from === to) return reply.code(400).send({ error: 'Source and destination are the same' });
+      if (to.startsWith(`${from}/`)) return reply.code(400).send({ error: 'Cannot move a folder into itself' });
+
+      const rows = db.prepare(`SELECT id, vpath FROM files WHERE ${IN_FOLDER_SQL}`).all(inFolderArg(from)) as {
+        id: string;
+        vpath: string;
+      }[];
+      if (!rows.length) return reply.code(404).send({ error: 'Folder not found' });
+      const moves = rows.map((r) => ({ id: r.id, vpath: to + r.vpath.slice(from.length) }));
+      if (moves.some((m) => !parseVirtualPath(m.vpath))) {
+        return reply.code(400).send({ error: 'Resulting paths would be too long or too deep' });
+      }
+
+      const remap = (g: string) => (g === from || g.startsWith(`${from}/`) ? to + g.slice(from.length) : g);
+      try {
+        db.transaction(() => {
+          // Two passes: a parking name first, so paths inside the moved set never collide mid-way.
+          // "~" can never appear in a real path. A clash with a file outside the set still fails.
+          const park = db.prepare('UPDATE files SET vpath = ? WHERE id = ?');
+          for (const m of moves) park.run(`~moving/${m.id}`, m.id);
+          for (const m of moves) park.run(m.vpath, m.id);
+          const users = db.prepare('SELECT id, folders FROM users').all() as { id: string; folders: string }[];
+          for (const u of users) {
+            const before = JSON.parse(u.folders) as string[];
+            const after = [...new Set(before.map(remap))];
+            if (JSON.stringify(after) !== JSON.stringify(before)) {
+              db.prepare('UPDATE users SET folders = ? WHERE id = ?').run(JSON.stringify(after), u.id);
+            }
+          }
+        })();
+      } catch (e: any) {
+        if (e?.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+          return reply.code(409).send({ error: 'Some files already exist at the destination' });
+        }
+        throw e;
+      }
+      req.log.info({ adminId: req.user.sub, from, to, files: rows.length }, 'folder moved');
+      return { from, to, moved: rows.length };
+    },
+  );
+
+  // Delete a folder and everything in it (the public URLs stop working)
+  app.delete<{ Querystring: { folder: string } }>(
+    '/folders',
+    { schema: { querystring: folderBody(['folder']) } },
+    async (req, reply) => {
+      const folder = normalizeFolder(req.query.folder);
+      if (!folder) return reply.code(400).send({ error: 'Refusing to delete the root folder' });
+      const rows = db.prepare(`SELECT id, stored_name FROM files WHERE ${IN_FOLDER_SQL}`).all(inFolderArg(folder)) as {
+        id: string;
+        stored_name: string;
+      }[];
+      if (!rows.length) return reply.code(404).send({ error: 'Folder not found' });
+      db.prepare(`DELETE FROM files WHERE ${IN_FOLDER_SQL}`).run(inFolderArg(folder));
+      await Promise.all(rows.map((f) => fsp.rm(path.join(storageDir, f.stored_name), { force: true })));
+      req.log.info({ adminId: req.user.sub, folder, files: rows.length }, 'folder deleted');
+      return { folder, deleted: rows.length };
     },
   );
 

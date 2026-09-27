@@ -71,6 +71,11 @@ export function parseVirtualPath(p: string): string | null {
   return p;
 }
 
+/** SQL condition (and its argument) matching every file inside a folder, at any depth. */
+export const IN_FOLDER_SQL = "vpath LIKE ? ESCAPE '\\'";
+// Segments are [A-Za-z0-9._-] only, so "_" is the only LIKE wildcard that can appear
+export const inFolderArg = (folder: string) => `${folder.replace(/_/g, '\\_')}/%`;
+
 /** A user may write to a folder if they are admin or it is inside one of their granted folders. */
 export function canWriteFolder(role: Role, grants: string[], folder: string): boolean {
   if (role === 'admin') return true;

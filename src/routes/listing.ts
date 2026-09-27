@@ -1,4 +1,5 @@
 import type { DB } from '../db.js';
+import { IN_FOLDER_SQL, inFolderArg } from '../storage.js';
 
 /**
  * Public folder index (the replacement for the old index.php): folders, files, search, an inline
@@ -19,8 +20,7 @@ export function buildListing(db: DB, folder: string): Listing | null {
   const prefix = folder ? `${folder}/` : '';
   const rows = (
     folder
-      ? // Segments are [A-Za-z0-9._-] only, so escaping "_" is all LIKE needs
-        db.prepare("SELECT vpath, size, mime FROM files WHERE vpath LIKE ? ESCAPE '\\'").all(`${prefix.replace(/_/g, '\\_')}%`)
+      ? db.prepare(`SELECT vpath, size, mime FROM files WHERE ${IN_FOLDER_SQL}`).all(inFolderArg(folder))
       : db.prepare('SELECT vpath, size, mime FROM files WHERE vpath IS NOT NULL').all()
   ) as { vpath: string; size: number; mime: string }[];
   if (!rows.length) return null;

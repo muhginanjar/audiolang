@@ -565,3 +565,116 @@ test('folder without slash and old index.php links redirect', async () => {
   const c = await app.inject({ method: 'GET', url: '/index.php' });
   assert.equal(c.headers.location, '/');
 });
+
+// ---------------- Folder management ----------------
+
+test('browse shows one folder level; non-admins only see their own files', async () => {
+  const admin = await tokenFor('admin@example.com');
+  const res = await api('GET', '/files/browse?folder=ar', admin);
+  assert.equal(res.statusCode, 200, res.body);
+  const b = res.json();
+  assert.equal(b.writable, true);
+  assert.deepEqual(b.folders.map((f: any) => f.name), ['sub']);
+  assert.ok(b.files.some((f: any) => f.path === 'ar/voice01.mp3' && f.owner === 'carol@example.com'));
+
+  const dave = await tokenFor('dave@example.com');
+  const d = (await api('GET', '/files/browse?folder=ar', dave)).json();
+  assert.equal(d.writable, true);
+  assert.equal(d.files.length, 0, 'dave owns nothing in ar');
+  assert.equal((await api('GET', '/files/browse', dave)).json().writable, false, 'no grant on root');
+  assert.equal((await api('GET', '/files/browse?folder=..%2Fetc', dave)).statusCode, 400);
+});
+
+test('a file can be renamed/moved only within writable folders, keeping its type', async () => {
+  const carol = await tokenFor('carol@example.com');
+  const f = (await upload(carol, 'mv.mp3', MP3, 'audio/mpeg', '?folder=ar')).json();
+
+  const ok = await api('PATCH', `/files/${f.id}`, carol, { path: 'ar/sub/moved.mp3' });
+  assert.equal(ok.statusCode, 200, ok.body);
+  assert.equal(ok.json().url, 'https://cdn.example.com/ar/sub/moved.mp3');
+  assert.equal((await app.inject({ method: 'GET', url: '/ar/sub/moved.mp3' })).statusCode, 200);
+  assert.equal((await app.inject({ method: 'GET', url: '/ar/mv.mp3' })).statusCode, 404);
+
+  assert.equal((await api('PATCH', `/files/${f.id}`, carol, { path: 'ar_old/moved.mp3' })).statusCode, 403);
+  assert.equal((await api('PATCH', `/files/${f.id}`, carol, { path: 'ar/moved.png' })).statusCode, 400);
+  assert.equal((await api('PATCH', `/files/${f.id}`, carol, { path: 'ar/voice01.mp3' })).statusCode, 409);
+  assert.equal((await api('PATCH', `/files/${f.id}`, carol, { path: 'ar/../x.mp3' })).statusCode, 400);
+
+  const dave = await tokenFor('dave@example.com');
+  assert.equal((await api('PATCH', `/files/${f.id}`, dave, { path: 'ar/stolen.mp3' })).statusCode, 404);
+});
+
+test('admin can move a folder; files and folder grants follow; clashes roll back', async () => {
+  const admin = await tokenFor('admin@example.com');
+  for (const [folder, name] of [['mv/a', '1.mp3'], ['mv/a/b', '2.mp3'], ['clash', '1.mp3']]) {
+    assert.equal((await upload(admin, name, MP3, 'audio/mpeg', `?folder=${folder}`)).statusCode, 201);
+  }
+  await api('PATCH', `/admin/users/${userId('dave@example.com')}`, admin, { folders: ['ar', 'mv/a/b'] });
+
+  const moved = await api('POST', '/admin/folders/move', admin, { from: 'mv/a', to: 'mv2' });
+  assert.equal(moved.statusCode, 200, moved.body);
+  assert.equal(moved.json().moved, 2);
+  assert.equal((await app.inject({ method: 'GET', url: '/mv2/1.mp3' })).statusCode, 200);
+  assert.equal((await app.inject({ method: 'GET', url: '/mv2/b/2.mp3' })).statusCode, 200);
+  assert.equal((await app.inject({ method: 'GET', url: '/mv/a/1.mp3' })).statusCode, 404);
+  const dave = await tokenFor('dave@example.com');
+  assert.deepEqual((await api('GET', '/auth/me', dave)).json().folders, ['ar', 'mv2/b']);
+
+  const clash = await api('POST', '/admin/folders/move', admin, { from: 'mv2', to: 'clash' });
+  assert.equal(clash.statusCode, 409);
+  assert.equal((await app.inject({ method: 'GET', url: '/mv2/1.mp3' })).statusCode, 200, 'nothing moved');
+
+  assert.equal((await api('POST', '/admin/folders/move', admin, { from: 'mv2', to: 'mv2/inner' })).statusCode, 400);
+  assert.equal((await api('POST', '/admin/folders/move', admin, { from: 'nope', to: 'x' })).statusCode, 404);
+  assert.equal((await api('POST', '/admin/folders/move', admin, { from: 'mv2', to: 'auth' })).statusCode, 400);
+  const carol = await tokenFor('carol@example.com');
+  assert.equal((await api('POST', '/admin/folders/move', carol, { from: 'ar', to: 'x' })).statusCode, 403);
+});
+
+test('moving a folder up into its parent works even when paths overlap', async () => {
+  const admin = await tokenFor('admin@example.com');
+  await upload(admin, 'z.mp3', MP3, 'audio/mpeg', '?folder=p/q/q');
+  await upload(admin, 'z.mp3', MP3, 'audio/mpeg', '?folder=p/q');
+  // p/q/q/z.mp3 -> p/q/z.mp3 (currently taken by the file that itself moves to p/z.mp3)
+  const res = await api('POST', '/admin/folders/move', admin, { from: 'p/q', to: 'p' });
+  assert.equal(res.statusCode, 200, res.body);
+  assert.equal((await app.inject({ method: 'GET', url: '/p/z.mp3' })).statusCode, 200);
+  assert.equal((await app.inject({ method: 'GET', url: '/p/q/z.mp3' })).statusCode, 200);
+});
+
+test('admin can delete a folder with everything in it', async () => {
+  const admin = await tokenFor('admin@example.com');
+  const carol = await tokenFor('carol@example.com');
+  assert.equal((await api('DELETE', '/admin/folders?folder=mv2', carol)).statusCode, 403);
+  assert.equal((await api('DELETE', '/admin/folders?folder=', admin)).statusCode, 400);
+  const res = await api('DELETE', '/admin/folders?folder=mv2', admin);
+  assert.equal(res.statusCode, 200, res.body);
+  assert.equal(res.json().deleted, 2);
+  assert.equal((await app.inject({ method: 'GET', url: '/mv2/1.mp3' })).statusCode, 404);
+  assert.equal((await api('DELETE', '/admin/folders?folder=mv2', admin)).statusCode, 404);
+});
+
+// ---------------- Admin console page ----------------
+
+test('admin console is served with a strict CSP and no inline code', async () => {
+  const redirect = await app.inject({ method: 'GET', url: '/admin' });
+  assert.equal(redirect.statusCode, 301);
+  assert.equal(redirect.headers.location, '/admin/');
+
+  const page = await app.inject({ method: 'GET', url: '/admin/' });
+  assert.equal(page.statusCode, 200);
+  assert.match(String(page.headers['content-type']), /^text\/html/);
+  const csp = String(page.headers['content-security-policy']);
+  assert.match(csp, /script-src 'self'/);
+  assert.match(csp, /frame-ancestors 'none'/);
+  assert.doesNotMatch(csp, /unsafe-inline|unsafe-eval/);
+  assert.equal(page.headers['cache-control'], 'no-store');
+  assert.doesNotMatch(page.body, /<script>(?!<\/script>)|\son[a-z]+=/i);
+
+  const js = await app.inject({ method: 'GET', url: '/admin/app.js' });
+  assert.equal(js.statusCode, 200);
+  assert.match(String(js.headers['content-type']), /javascript/);
+  assert.doesNotMatch(js.body, /innerHTML|outerHTML|insertAdjacentHTML|document\.write|eval\(/);
+  assert.equal((await app.inject({ method: 'GET', url: '/admin/app.css' })).statusCode, 200);
+  assert.equal((await app.inject({ method: 'GET', url: '/admin/../src/config.ts' })).statusCode, 404);
+});
