@@ -478,7 +478,7 @@ async function renderFiles(folder) {
   const panel = h('div', { class: 'panel dropzone' }, table);
   main.replaceChildren(
     h('div', { class: 'page-title' }, h('h1', {}, parts.length ? parts[parts.length - 1] : 'Files'), summary),
-    crumbs, toolbar, intro, queue, panel);
+    crumbs, toolbar, ...intro, queue, panel);
 
   if (data.writable) enableDrop(panel, startUpload);
 }
