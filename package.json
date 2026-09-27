@@ -1,0 +1,43 @@
+{
+  "name": "secure-cdn-api",
+  "version": "1.0.0",
+  "description": "Secure file upload + CDN URL API (Fastify + SQLite)",
+  "main": "dist/src/server.js",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/src/server.js",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test test/*.test.ts",
+    "user:create": "tsx scripts/create-user.ts create",
+    "user:role": "tsx scripts/create-user.ts role",
+    "seed:admin": "tsx scripts/seed-admin.ts",
+    "import": "tsx scripts/import-dir.ts",
+    "audit": "npm audit --omit=dev"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.1.2",
+    "@fastify/cors": "^11.3.0",
+    "@fastify/helmet": "^13.1.1",
+    "@fastify/jwt": "^10.2.2",
+    "@fastify/multipart": "^10.1.2",
+    "@fastify/rate-limit": "^11.2.0",
+    "@fastify/static": "^10.1.5",
+    "@node-rs/argon2": "^2.2.1",
+    "better-sqlite3": "^13.0.3",
+    "dotenv": "^18.0.4",
+    "fastify": "^5.12.5",
+    "file-type": "^22.1.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^26.6.3",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  },
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  }
+}
