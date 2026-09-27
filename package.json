@@ -16,7 +16,7 @@
     "audit": "npm audit --omit=dev"
   },
   "dependencies": {
-    "@fastify/cookie": "^11.1.2",
+    "@fastify/cookie": "~11.0.2",
     "@fastify/cors": "^11.3.0",
     "@fastify/helmet": "^13.1.1",
     "@fastify/jwt": "^10.2.2",
@@ -24,20 +24,25 @@
     "@fastify/rate-limit": "^11.2.0",
     "@fastify/static": "^10.1.5",
     "@node-rs/argon2": "^2.2.1",
-    "better-sqlite3": "^13.0.3",
+    "better-sqlite3": "^12.11.1",
     "dotenv": "^18.0.4",
     "fastify": "^5.12.5",
-    "file-type": "^22.1.1"
+    "file-type": "^21.3.4"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^9.6.0",
-    "@types/node": "^26.6.3",
+    "@types/node": "^20.19.43",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
   },
   "type": "module",
   "private": true,
   "engines": {
-    "node": ">=20"
+    "node": "^20.6.0 || >=22.0.0"
+  },
+  "overrides": {
+    "@fastify/static": {
+      "content-disposition": "^2.0.1"
+    }
   }
 }

@@ -11,6 +11,9 @@ Server/admin    ──POST /files (API key / login)──►  this API  ──�
 
 ## Quick start
 
+Requires **Node.js 20.6+ or 22+** (tested on 20.20 and 24.21). `better-sqlite3` is a native module, so run
+`npm ci` again after switching Node versions.
+
 ```bash
 npm install
 cp .env.example .env                   # set JWT_SECRET (openssl rand -hex 32) and PUBLIC_BASE_URL
